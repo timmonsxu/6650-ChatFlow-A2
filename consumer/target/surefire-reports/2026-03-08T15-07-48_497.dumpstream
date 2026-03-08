@@ -1,5 +1,0 @@
-# Created at 2026-03-08T15:07:48.656
-Boot Manifest-JAR contains absolute paths in classpath 'D:\NEU\2026Spring\6650DistributedSystem\6650-ChatFlow-A2\consumer\target\test-classes'
-Hint: <argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true</argLine>
-'other' has different root
-
