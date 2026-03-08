@@ -1,0 +1,4 @@
+com\chatflow\consumer\ConsumerApplication.class
+com\chatflow\consumer\HealthController.class
+com\chatflow\consumer\BroadcastClient.class
+com\chatflow\consumer\SqsConsumerService.class
