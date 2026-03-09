@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChatFlow A2 Architecture Diagram</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Inter, sans-serif; background: #f8fafc; min-height: 100vh; padding: 20px; }
+    button { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState } = React;
+
+    const Arrow = ({ x1, y1, x2, y2, label, color = "#64748b", dashed = false }) => {
+      const dx = x2 - x1, dy = y2 - y1;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      const ux = dx / len, uy = dy / len;
+      const ax = x2 - ux * 12, ay = y2 - uy * 12;
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      const id = `arrow-${color.replace("#","")}`;
+      return (
+        <g>
+          <defs>
+            <marker id={id} markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill={color} />
+            </marker>
+          </defs>
+          <line x1={x1} y1={y1} x2={ax} y2={ay}
+            stroke={color} strokeWidth="2"
+            strokeDasharray={dashed ? "6,3" : "none"}
+            markerEnd={`url(#${id})`} />
+          {label && (
+            <text x={mx} y={my - 6} textAnchor="middle" fontSize="11" fill={color} fontWeight="500">{label}</text>
+          )}
+        </g>
+      );
+    };
+
+    const Box = ({ x, y, w, h, title, subtitle, lines = [], color, icon }) => (
+      <g>
+        <rect x={x} y={y} width={w} height={h} rx="10"
+          fill={color.bg} stroke={color.border} strokeWidth="2"
+          filter="url(#shadow)" />
+        <rect x={x} y={y} width={w} height="36" rx="10"
+          fill={color.header} stroke="none" />
+        <rect x={x} y={y + 26} width={w} height="10"
+          fill={color.header} stroke="none" />
+        <text x={x + w / 2} y={y + 23} textAnchor="middle"
+          fontSize="13" fontWeight="700" fill="white">{icon} {title}</text>
+        {subtitle && (
+          <text x={x + w / 2} y={y + 50} textAnchor="middle"
+            fontSize="11" fill={color.text}>{subtitle}</text>
+        )}
+        {lines.map((l, i) => (
+          <text key={i} x={x + 12} y={y + 66 + i * 17}
+            fontSize="10.5" fill={color.text}>• {l}</text>
+        ))}
+      </g>
+    );
+
+    const QueueBox = ({ x, y, label, count }) => (
+      <g>
+        <rect x={x} y={y} width="60" height="28" rx="6"
+          fill="#fef3c7" stroke="#f59e0b" strokeWidth="1.5" />
+        <text x={x + 30} y={y + 12} textAnchor="middle" fontSize="9.5" fill="#92400e" fontWeight="600">{label}</text>
+        <text x={x + 30} y={y + 24} textAnchor="middle" fontSize="9" fill="#b45309">{count}</text>
+      </g>
+    );
+
+    const steps = [
+      { id: 1, label: "① WS Connect", desc: "Client opens WebSocket connection via ALB. Sticky Session cookie routes all subsequent frames from the same client to the same Server instance." },
+      { id: 2, label: "② Send Message", desc: "Client sends JSON message: { userId, username, message, timestamp, messageType, roomId }." },
+      { id: 3, label: "③ Validate + ACK", desc: "Server validates the message, sends RECEIVED ack immediately to the client. Does NOT wait for SQS." },
+      { id: 4, label: "④ Async SQS Publish", desc: "Server fires publishAsync() in a background thread pool (20 threads). Message goes to chatflow-room-{roomId}.fifo with MessageGroupId=roomId." },
+      { id: 5, label: "⑤ Poll SQS", desc: "Consumer's 20 polling threads (one per room) long-poll their respective SQS FIFO queues (waitTimeSeconds=20, maxMessages=10)." },
+      { id: 6, label: "⑥ Parallel Broadcast", desc: "Consumer calls POST /internal/broadcast/{roomId} on ALL Server instances IN PARALLEL using CompletableFuture.sendAsync(). Total time = max(calls), not sum." },
+      { id: 7, label: "⑦ Push to Sessions", desc: "Each Server looks up its local roomSessions map, finds all WebSocket sessions in that room, and pushes via ConcurrentWebSocketSessionDecorator (DROP overflow)." },
+    ];
+
+    function App() {
+      const [step, setStep] = useState(null);
+
+      return (
+        <div style={{ fontFamily: "Inter, sans-serif", background: "#f8fafc", minHeight: "100vh", padding: "20px" }}>
+          <h2 style={{ textAlign: "center", color: "#1e293b", marginBottom: 4, fontSize: 20 }}>ChatFlow A2 — System Architecture</h2>
+          <p style={{ textAlign: "center", color: "#64748b", fontSize: 12, marginBottom: 16 }}>
+            Click a step below to highlight the message flow
+          </p>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center", marginBottom: 16 }}>
+            {steps.map(s => (
+              <button key={s.id} onClick={() => setStep(step === s.id ? null : s.id)}
+                style={{
+                  padding: "4px 10px", borderRadius: 6, fontSize: 11, border: "1.5px solid",
+                  background: step === s.id ? "#3b82f6" : "#fff",
+                  color: step === s.id ? "#fff" : "#374151",
+                  borderColor: step === s.id ? "#2563eb" : "#d1d5db",
+                  fontWeight: step === s.id ? 700 : 400,
+                }}>{s.label}</button>
+            ))}
+            {step && <button onClick={() => setStep(null)}
+              style={{ padding: "4px 10px", borderRadius: 6, fontSize: 11, border: "1.5px solid #ef4444", background: "#fef2f2", color: "#ef4444" }}>✕ Clear</button>}
+          </div>
+
+          {step && (
+            <div style={{ background: "#eff6ff", border: "1.5px solid #93c5fd", borderRadius: 8, padding: "8px 14px", marginBottom: 14, maxWidth: 700, margin: "0 auto 14px" }}>
+              <span style={{ fontWeight: 700, color: "#1d4ed8", fontSize: 12 }}>{steps.find(s => s.id === step)?.label}: </span>
+              <span style={{ color: "#1e40af", fontSize: 12 }}>{steps.find(s => s.id === step)?.desc}</span>
+            </div>
+          )}
+
+          <svg width="900" height="560" style={{ display: "block", margin: "0 auto", maxWidth: "100%" }}>
+            <defs>
+              <filter id="shadow" x="-5%" y="-5%" width="110%" height="120%">
+                <feDropShadow dx="0" dy="2" stdDeviation="3" floodColor="#00000022" />
+              </filter>
+            </defs>
+
+            <Box x={20} y={220} w={130} h={110}
+              title="Client" icon="💻"
+              subtitle="Local Machine"
+              lines={["120 sender threads", "40 warmup threads", "Per-room sub-queues"]}
+              color={{ bg: "#f0fdf4", header: "#16a34a", border: "#86efac", text: "#166534" }} />
+
+            <Box x={210} y={220} w={130} h={110}
+              title="ALB" icon="⚖️"
+              subtitle="6650A2 (port 80)"
+              lines={["Sticky Session", "HTTP→WS upgrade", "Health check /health"]}
+              color={{ bg: "#fdf4ff", header: "#9333ea", border: "#d8b4fe", text: "#581c87" }} />
+
+            <rect x={395} y={60} width={210} height={430} rx="12"
+              fill="#f0f9ff" stroke="#7dd3fc" strokeWidth="2" strokeDasharray="6,3" />
+            <text x={500} y={82} textAnchor="middle" fontSize="11" fill="#0369a1" fontWeight="700">EC2 A  (172.31.25.72)</text>
+
+            <Box x={410} y={90} w={180} h={130}
+              title="Server-v2" icon="🖥"
+              subtitle=":8080"
+              lines={["Validate + ACK", "ConcurrentWS Decorator", "broadcastExecutor x40", "SqsPublisher async x20"]}
+              color={{ bg: "#fff7ed", header: "#ea580c", border: "#fdba74", text: "#9a3412" }} />
+
+            <Box x={410} y={260} w={180} h={130}
+              title="Consumer" icon="📥"
+              subtitle=":8081"
+              lines={["20 polling threads", "Long-poll waitTime=20s", "Parallel broadcast calls", "CompletableFuture.sendAsync"]}
+              color={{ bg: "#f0fdf4", header: "#059669", border: "#6ee7b7", text: "#065f46" }} />
+
+            <rect x={660} y={130} width={190} height={170} rx="12"
+              fill="#f0f9ff" stroke="#7dd3fc" strokeWidth="2" strokeDasharray="6,3" />
+            <text x={755} y={152} textAnchor="middle" fontSize="11" fill="#0369a1" fontWeight="700">EC2 B  (172.31.24.104)</text>
+
+            <Box x={672} y={160} w={168} h={120}
+              title="Server-v2" icon="🖥"
+              subtitle=":8080"
+              lines={["Same config as EC2 A", "Independent JVM", "Dedicated 2 vCPU"]}
+              color={{ bg: "#fff7ed", header: "#ea580c", border: "#fdba74", text: "#9a3412" }} />
+
+            <rect x={200} y={420} width={450} height={120} rx="10"
+              fill="#fffbeb" stroke="#f59e0b" strokeWidth="2" />
+            <text x={425} y={443} textAnchor="middle" fontSize="12" fill="#92400e" fontWeight="700">AWS SQS — 20 FIFO Queues</text>
+            <text x={425} y={458} textAnchor="middle" fontSize="10" fill="#b45309">chatflow-room-01.fifo … chatflow-room-20.fifo</text>
+
+            {[0,1,2,3,4].map(i => (
+              <QueueBox key={i} x={215 + i * 72} y={465}
+                label={`room-0${i+1}`} count="FIFO" />
+            ))}
+            <text x={585} y={486} fontSize="13" fill="#b45309" fontWeight="700">···</text>
+            <QueueBox x={605} y={465} label="room-20" count="FIFO" />
+
+            <Arrow x1={150} y1={265} x2={210} y2={265} label="① WS Connect" color={step === 1 ? "#2563eb" : "#6366f1"} />
+            <Arrow x1={150} y1={290} x2={210} y2={290} label="② Message" color={step === 2 ? "#2563eb" : "#8b5cf6"} />
+            <Arrow x1={340} y1={260} x2={410} y2={185} label="route" color={step === 1 || step === 2 ? "#2563eb" : "#9333ea"} />
+            <Arrow x1={340} y1={280} x2={672} y2={220} label="route" color={step === 1 || step === 2 ? "#2563eb" : "#9333ea"} />
+            <Arrow x1={410} y1={210} x2={340} y2={275} label="③ ACK" color={step === 3 ? "#16a34a" : "#22c55e"} />
+            <Arrow x1={500} y1={220} x2={460} y2={420} label="④ publishAsync" color={step === 4 ? "#d97706" : "#f59e0b"} />
+            <Arrow x1={755} y1={280} x2={560} y2={430} label="④ publishAsync" color={step === 4 ? "#d97706" : "#f59e0b"} />
+            <Arrow x1={465} y1={390} x2={430} y2={420} label="⑤ poll" color={step === 5 ? "#059669" : "#10b981"} />
+            <Arrow x1={500} y1={260} x2={500} y2={220} label="⑥ broadcast" color={step === 6 ? "#7c3aed" : "#a78bfa"} />
+            <Arrow x1={590} y1={310} x2={672} y2={250} label="⑥ broadcast" color={step === 6 ? "#7c3aed" : "#a78bfa"} />
+            <Arrow x1={410} y1={155} x2={210} y2={310} label="⑦ WS push" color={step === 7 ? "#ea580c" : "#fb923c"} dashed={true} />
+
+            <rect x={20} y={430} width={160} height={110} rx="8"
+              fill="white" stroke="#e2e8f0" strokeWidth="1.5" />
+            <text x={30} y={448} fontSize="11" fontWeight="700" fill="#374151">Legend</text>
+            {[
+              { color: "#6366f1", label: "WebSocket (Client↔ALB↔Server)" },
+              { color: "#22c55e", label: "RECEIVED ack" },
+              { color: "#f59e0b", label: "SQS publish (async)" },
+              { color: "#10b981", label: "SQS poll" },
+              { color: "#a78bfa", label: "Broadcast HTTP (parallel)" },
+              { color: "#fb923c", label: "WS push to client (dashed)", dashed: true },
+            ].map((item, i) => (
+              <g key={i}>
+                <line x1={30} y1={460 + i * 14} x2={50} y2={460 + i * 14}
+                  stroke={item.color} strokeWidth="2"
+                  strokeDasharray={item.dashed ? "4,2" : "none"} />
+                <text x={55} y={464 + i * 14} fontSize="9.5" fill="#374151">{item.label}</text>
+              </g>
+            ))}
+          </svg>
+
+          <p style={{ textAlign: "center", color: "#94a3b8", fontSize: 11, marginTop: 8 }}>
+            ALB uses Sticky Session (LB cookie) to ensure each client always routes to the same Server instance.
+            Consumer broadcasts in parallel to both EC2s simultaneously.
+          </p>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

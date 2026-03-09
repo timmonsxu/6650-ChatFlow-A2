@@ -2,7 +2,7 @@
 
 ## 1. Git Repository URL
 
-https://github.com/timmonsxu/6650-ChatFlow
+https://github.com/timmonsxu/6650-ChatFlow-A2
 
 Repository structure:
 ```
@@ -13,8 +13,6 @@ Repository structure:
   deployment/      ALB configuration and startup scripts
   monitoring/      CloudWatch metric notes and SQS monitoring queries
   results/         Test results, architecture document, this file
-  plan.md          Implementation plan and design decisions
-  review.md        Debug log — all issues encountered and solutions applied
 ```
 
 ---
@@ -177,7 +175,25 @@ Sticky sessions are critical for WebSocket correctness. Each SenderThread's conn
 
 ### Single Instance Tests
 
-**Client Output — Warmup + Main Phase (200K messages, 128 threads)**
+#### Thread Count Tuning — Finding the Stable Configuration
+
+The single-instance test required iterative tuning to find a thread count that
+could complete without crashing on a t3.micro EC2. The following attempts were made:
+
+| Thread count | Messages | Outcome | Failure reason |
+|---|---|---|---|
+| 512 | 500K | ❌ Crash | Tomcat thread pool saturated (512 > 200 default), Consumer HTTP requests could not connect |
+| 256 | 500K | ❌ Crash | Still exceeded Tomcat capacity under sustained load; `Connection pool shut down` |
+| 128 | 500K | ❌ Crash | After ~7 minutes, broadcastExecutor unbounded queue caused memory exhaustion |
+| 128 | 200K | ✅ Pass | Completed before memory pressure reached critical threshold |
+| 120 | 200K | ✅ Pass | Reduced slightly from 128 to balance thread count across 20 rooms evenly (120 / 20 = 6 per room) |
+
+The root causes encountered during single-instance tuning are documented in detail
+in `review.md`. Key fixes applied: async SQS publish, async broadcast executor,
+bounded broadcastExecutor queue (ArrayBlockingQueue 2000), Tomcat thread count
+raised to 500, ConcurrentWebSocketSessionDecorator overflow strategy set to DROP.
+
+#### Stable Single Instance Result (200K messages, 120 threads)
 
 ```
 ============================================
@@ -220,44 +236,108 @@ Sticky sessions are critical for WebSocket correctness. Each SenderThread's conn
 ========================================
 ```
 
-**[ SCREENSHOT PLACEHOLDER — SQS Console: queue depths over time ]**
-*Insert screenshot of AWS SQS Console showing all 20 queues with message count over time. Expected pattern: stable plateau during client run, rapid drain after client stops.*
+**[ SCREENSHOT PLACEHOLDER — SQS Console: queue depths over time (single instance) ]**
+*Insert screenshot of AWS SQS Console showing queue depth during single instance 200K test.*
 
 **[ SCREENSHOT PLACEHOLDER — SQS Console: message rates (send/receive) ]**
-*Insert screenshot showing NumberOfMessagesSent and NumberOfMessagesReceived metrics from CloudWatch for the chatflow-room queues.*
+*Insert screenshot showing NumberOfMessagesSent and NumberOfMessagesReceived metrics.*
 
-**[ SCREENSHOT PLACEHOLDER — SQS Console: consumer details ]**
-*Insert screenshot showing ApproximateNumberOfMessagesNotVisible (in-flight messages) and consumer activity.*
+---
 
-### Load Balanced Tests (2 Instances — 2 EC2s)
+### Load Balanced Tests
 
-**[ SCREENSHOT PLACEHOLDER — Client output for 2-instance test ]**
-*Insert terminal screenshot showing 500K message run with ALB DNS as server URL.*
+#### Scaling Attempts — Finding the Stable Multi-Instance Configuration
 
-**[ SCREENSHOT PLACEHOLDER — ALB Console: request distribution ]**
-*Insert screenshot from ALB → Monitoring showing RequestCount per target, confirming roughly equal distribution between EC2 A and EC2 B.*
+After confirming the single-instance baseline, multiple ALB + multi-instance
+configurations were attempted:
 
-**[ SCREENSHOT PLACEHOLDER — SQS queue depth comparison: 1 instance vs 2 instances ]**
-*Insert side-by-side or overlay comparison of queue depth profiles.*
+| Configuration | Messages | Outcome | Failure reason |
+|---|---|---|---|
+| 1 EC2, 4 Server instances (ports 8080/8082/8083/8084) | 200K | ❌ Crash | 4 JVM processes on 2 vCPUs caused extreme context switch overhead; CPU fully saturated |
+| 1 EC2, 2 Server instances (ports 8080/8082) | 200K | ❌ Crash | Even 2 processes competing for 2 vCPUs was insufficient; Consumer broadcast serial calls doubled processing time per message |
+| 2 EC2s, 1 Server instance each (EC2 A :8080, EC2 B :8080) | 500K | ✅ Pass | Each EC2 has dedicated 2 vCPUs; Consumer broadcast calls parallelised with CompletableFuture.sendAsync() |
 
-**Performance Improvement Analysis**
+The key insight from the 1-EC2 2-instance failure: Consumer was calling all Server
+instances **serially**, so adding more servers multiplied Consumer processing time
+per message rather than reducing it. Fixed by rewriting `BroadcastClient.broadcast()`
+to use parallel `CompletableFuture.sendAsync()` calls.
 
-| Metric | Single Instance | 2 Instances (2 EC2s) |
+#### Load Balanced Result (500K messages, 2 EC2s, via ALB)
+
+```
+============================================
+  ChatFlow Load Test Client - Part 1 (A2)
+  Server: ws://6650A2-476604144.us-west-2.elb.amazonaws.com
+  Total messages: 500000
+  Rooms: 20
+  Warmup: 40 threads x 1000 msgs
+  Main:   120 threads, 120 sessions
+============================================
+>>> Warmup Phase starting...
+========================================
+  Warmup Phase Results
+========================================
+  Successful messages : 40,000
+  Failed messages     : 0
+  Total runtime       : 22.94 seconds
+  Throughput          : 1,744 msg/s
+  Total connections   : 40
+  Reconnections       : 0
+========================================
+>>> Main Phase: 120 threads (120 sessions), 460000 remaining messages
+[Generator] All 500000 messages generated.
+========================================
+  Main Phase Results
+========================================
+  Successful messages : 460,000
+  Failed messages     : 0
+  Total runtime       : 90.19 seconds
+  Throughput          : 5,100 msg/s
+  Total connections   : 120
+  Reconnections       : 0
+========================================
+========================================
+  Overall Summary
+========================================
+  Total successful    : 500,000
+  Total failed        : 0
+  Total wall time     : 113.15 seconds
+  Overall throughput  : 4,419 msg/s
+========================================
+```
+
+**[ SCREENSHOT PLACEHOLDER — ALB Console: request distribution across EC2 A and EC2 B ]**
+*Insert screenshot from ALB → Monitoring showing RequestCount per target.*
+
+**[ SCREENSHOT PLACEHOLDER — SQS Console: queue depths over time (2-instance test) ]**
+*Insert screenshot showing queue depth profile during the 500K test.*
+
+#### Performance Improvement Analysis
+
+| Metric | Single Instance (200K) | 2 Instances / 2 EC2s (500K) |
 |---|---|---|
-| Warmup throughput | ~700 msg/s | ~TBD |
-| Main phase throughput | ~2,190 msg/s | ~TBD |
-| Overall throughput | ~1,653 msg/s | ~TBD |
-| Peak queue depth | ~4,000 | ~TBD |
-| Failures | 0 | TBD |
-| Max stable message count | 200K | 500K |
+| Warmup throughput | 723 msg/s | 1,744 msg/s |
+| Main phase throughput | 2,190 msg/s | 5,100 msg/s |
+| Overall throughput | 1,653 msg/s | 4,419 msg/s |
+| Total failures | 0 | 0 |
+| Max messages completed | 200,000 | 500,000 |
+| Total wall time | 120.98 seconds | 113.15 seconds |
 
-*Fill in TBD values after running the 2-instance 500K test.*
+Main phase throughput improved by **2.33×** (2,190 → 5,100 msg/s) and overall
+throughput improved by **2.67×** (1,653 → 4,419 msg/s). The improvement exceeds
+the theoretical 2× because each EC2 no longer competes with another Server process
+for CPU, and the Consumer parallel broadcast eliminates the serial-call overhead
+that was present in earlier single-EC2 multi-instance attempts.
 
-### Load Balanced Tests (4 Instances)
+#### Note on 4-Instance Testing
 
-*Note: Due to t3.micro hardware constraints, 4 instances on a single EC2 caused CPU saturation and degraded performance. True 4-instance testing requires 4 separate EC2s or larger instance types. Results below are from the 2-EC2 configuration which represents the practical limit for this hardware.*
-
-**[ SCREENSHOT PLACEHOLDER — Client output for 4-instance test if available ]**
+The assignment specifies testing with up to 4 instances. Due to t3.micro hardware
+constraints, running 4 instances on a single EC2 caused CPU saturation and
+degraded performance compared to even a single instance. True 4-instance horizontal
+scaling requires 4 separate EC2s or a larger instance type (e.g., t3.medium with
+2 vCPUs and 4GB RAM per instance). The 2-EC2 configuration documented above
+demonstrates the load balancing principle effectively and achieves a clear
+performance improvement over the single-instance baseline.
 
 ---
 
